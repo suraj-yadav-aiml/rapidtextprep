@@ -7,6 +7,7 @@ name = "rapidtextprep"
 version = "0.1.0"
 description = "Fast pandas-friendly text preprocessing utilities."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
   "numpy",
@@ -29,6 +30,7 @@ packages = ["src/rapidtextprep"]
 include = [
   "/src/rapidtextprep",
   "/tests",
+  "/LICENSE",
   "/README.md",
   "/pyproject.toml",
 ]
