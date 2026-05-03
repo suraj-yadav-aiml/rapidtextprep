@@ -27,7 +27,7 @@ from .normalization import (
     remove_accented_chars,
     remove_multiple_whitespaces,
 )
-from .stopwords import DEFAULT_KEEP_STOPWORDS, remove_stopwords
+from .stopwords import DEFAULT_KEEP_STOPWORDS, StopwordBackend, remove_stopwords
 
 ParallelBackend = Literal["thread", "process"]
 
@@ -49,6 +49,12 @@ def _validate_parallel_backend(parallel_backend: ParallelBackend) -> None:
         raise ValueError("parallel_backend must be 'thread' or 'process'")
 
 
+def _validate_stopword_backend(stopword_backend: StopwordBackend) -> None:
+    """Validate the requested stopword removal backend."""
+    if stopword_backend not in {"regex", "flashtext"}:
+        raise ValueError("stopword_backend must be 'regex' or 'flashtext'")
+
+
 def _iter_series_chunks(text: pd.Series, chunk_size: int) -> list[pd.Series]:
     """Split a Series into positional chunks."""
     return [
@@ -61,6 +67,7 @@ def _pre_lemmatization_clean_text_batch(
     text: TextInput,
     keep_stopwords: Collection[str] | None,
     extra_stopwords: Collection[str] | None,
+    stopword_backend: StopwordBackend,
 ) -> TextOutput:
     """Run text cleaning stages that are safe to apply per chunk."""
     result = get_lower_case(text)
@@ -82,6 +89,7 @@ def _pre_lemmatization_clean_text_batch(
         keep_words=keep_stopwords,
         extra_stopwords=extra_stopwords,
         ignore_case=False,
+        backend=stopword_backend,
     )
 
     return result
@@ -112,6 +120,7 @@ def _clean_text_batch(
     text: TextInput,
     keep_stopwords: Collection[str] | None,
     extra_stopwords: Collection[str] | None,
+    stopword_backend: StopwordBackend,
     use_lemmatization: bool,
     lemmatize_batch_size: int,
     n_process: int,
@@ -121,6 +130,7 @@ def _clean_text_batch(
         text=text,
         keep_stopwords=keep_stopwords,
         extra_stopwords=extra_stopwords,
+        stopword_backend=stopword_backend,
     )
 
     return _finalize_clean_text(
@@ -135,6 +145,7 @@ def _clean_series_chunks(
     text: pd.Series,
     keep_stopwords: Collection[str] | None,
     extra_stopwords: Collection[str] | None,
+    stopword_backend: StopwordBackend,
     chunk_size: int,
     n_jobs: int,
     parallel_backend: ParallelBackend,
@@ -149,6 +160,7 @@ def _clean_series_chunks(
         _pre_lemmatization_clean_text_batch,
         keep_stopwords=keep_stopwords,
         extra_stopwords=extra_stopwords,
+        stopword_backend=stopword_backend,
     )
 
     if n_jobs == 1 or len(chunks) == 1:
@@ -168,6 +180,7 @@ def get_complete_text_clean_up_batch(
     text: TextInput,
     keep_stopwords: Collection[str] | None = DEFAULT_KEEP_STOPWORDS,
     extra_stopwords: Collection[str] | None = None,
+    stopword_backend: StopwordBackend = "regex",
     use_lemmatization: bool = False,
     chunk_size: int | None = 100_000,
     lemmatize_batch_size: int = 5_000,
@@ -196,6 +209,9 @@ def get_complete_text_clean_up_batch(
         keep_stopwords: Stopwords to keep during stopword removal. Defaults to
             DEFAULT_KEEP_STOPWORDS. Use None to remove all stopwords.
         extra_stopwords: Additional words to remove along with STOPWORDS.
+        stopword_backend: Stopword removal backend. Use "regex" for the
+            original pandas vectorized implementation or "flashtext" for
+            trie-based keyword replacement on large stopword lists.
         use_lemmatization: Whether to apply fast lookup-based lemmatization.
             Defaults to False.
         chunk_size: Number of rows to process per chunk for pandas Series
@@ -219,12 +235,14 @@ def get_complete_text_clean_up_batch(
     """
     resolved_n_jobs = _resolve_n_jobs(n_jobs)
     _validate_parallel_backend(parallel_backend)
+    _validate_stopword_backend(stopword_backend)
 
     if isinstance(text, str):
         return _clean_text_batch(
             text=text,
             keep_stopwords=keep_stopwords,
             extra_stopwords=extra_stopwords,
+            stopword_backend=stopword_backend,
             use_lemmatization=use_lemmatization,
             lemmatize_batch_size=lemmatize_batch_size,
             n_process=n_process,
@@ -238,6 +256,7 @@ def get_complete_text_clean_up_batch(
             text=text,
             keep_stopwords=keep_stopwords,
             extra_stopwords=extra_stopwords,
+            stopword_backend=stopword_backend,
             use_lemmatization=use_lemmatization,
             lemmatize_batch_size=lemmatize_batch_size,
             n_process=n_process,
@@ -250,6 +269,7 @@ def get_complete_text_clean_up_batch(
         text=text,
         keep_stopwords=keep_stopwords,
         extra_stopwords=extra_stopwords,
+        stopword_backend=stopword_backend,
         chunk_size=chunk_size,
         n_jobs=resolved_n_jobs,
         parallel_backend=parallel_backend,
@@ -269,6 +289,7 @@ def clean_text_column_in_chunks(
     target_col: str = "clean_text",
     keep_stopwords: Collection[str] | None = DEFAULT_KEEP_STOPWORDS,
     extra_stopwords: Collection[str] | None = None,
+    stopword_backend: StopwordBackend = "regex",
     use_lemmatization: bool = False,
     chunk_size: int = 100_000,
     lemmatize_batch_size: int = 5_000,
@@ -286,6 +307,9 @@ def clean_text_column_in_chunks(
         target_col: Name of output clean text column.
         keep_stopwords: Stopwords to keep during stopword removal.
         extra_stopwords: Additional stopwords to remove.
+        stopword_backend: Stopword removal backend. Use "regex" for the
+            original pandas vectorized implementation or "flashtext" for
+            trie-based keyword replacement on large stopword lists.
         use_lemmatization: Whether to apply fast lookup lemmatization.
         chunk_size: Number of rows to clean per chunk.
         lemmatize_batch_size: Batch size used by spaCy nlp.pipe.
@@ -311,6 +335,7 @@ def clean_text_column_in_chunks(
         df[source_col],
         keep_stopwords=keep_stopwords,
         extra_stopwords=extra_stopwords,
+        stopword_backend=stopword_backend,
         use_lemmatization=use_lemmatization,
         chunk_size=chunk_size,
         lemmatize_batch_size=lemmatize_batch_size,
@@ -328,6 +353,7 @@ async def async_get_complete_text_clean_up_batch(
     text: TextInput,
     keep_stopwords: Collection[str] | None = DEFAULT_KEEP_STOPWORDS,
     extra_stopwords: Collection[str] | None = None,
+    stopword_backend: StopwordBackend = "regex",
     use_lemmatization: bool = False,
     chunk_size: int | None = 100_000,
     lemmatize_batch_size: int = 5_000,
@@ -342,6 +368,7 @@ async def async_get_complete_text_clean_up_batch(
         text,
         keep_stopwords=keep_stopwords,
         extra_stopwords=extra_stopwords,
+        stopword_backend=stopword_backend,
         use_lemmatization=use_lemmatization,
         chunk_size=chunk_size,
         lemmatize_batch_size=lemmatize_batch_size,
@@ -358,6 +385,7 @@ async def async_clean_text_column_in_chunks(
     target_col: str = "clean_text",
     keep_stopwords: Collection[str] | None = DEFAULT_KEEP_STOPWORDS,
     extra_stopwords: Collection[str] | None = None,
+    stopword_backend: StopwordBackend = "regex",
     use_lemmatization: bool = False,
     chunk_size: int = 100_000,
     lemmatize_batch_size: int = 5_000,
@@ -374,6 +402,7 @@ async def async_clean_text_column_in_chunks(
         target_col=target_col,
         keep_stopwords=keep_stopwords,
         extra_stopwords=extra_stopwords,
+        stopword_backend=stopword_backend,
         use_lemmatization=use_lemmatization,
         chunk_size=chunk_size,
         lemmatize_batch_size=lemmatize_batch_size,

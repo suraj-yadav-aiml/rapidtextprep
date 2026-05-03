@@ -48,6 +48,18 @@ def test_stopword_and_frequency_removal() -> None:
     assert remove_stopwords("this movie is not good but very emotional") == (
         "  movie   not good but very emotional"
     )
+    assert remove_stopwords(
+        "this movie is not good but very emotional",
+        backend="flashtext",
+    ) == ("  movie   not good but very emotional")
+    assert (
+        remove_stopwords(
+            "can't can",
+            extra_stopwords={"can"},
+            backend="flashtext",
+        )
+        == "can't  "
+    )
 
     text = pd.Series(["python is fast", "python is popular"])
     counts = get_value_counts(text)

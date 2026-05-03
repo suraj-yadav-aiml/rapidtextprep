@@ -53,6 +53,22 @@ def test_parallel_clean_text_matches_sequential() -> None:
     pd.testing.assert_series_equal(threaded, sequential)
 
 
+def test_flashtext_stopword_backend_matches_regex_pipeline() -> None:
+    texts = pd.Series(
+        [
+            "I CAN'T wait!!!",
+            "Visit https://example.com now",
+            "this movie is not good but very emotional",
+        ],
+        index=[10, 20, 30],
+    )
+
+    regex_result = clean_text(texts, chunk_size=2, stopword_backend="regex")
+    flashtext_result = clean_text(texts, chunk_size=2, stopword_backend="flashtext")
+
+    pd.testing.assert_series_equal(flashtext_result, regex_result)
+
+
 def test_process_parallel_clean_text_matches_sequential() -> None:
     texts = pd.Series(
         [
@@ -120,6 +136,11 @@ def test_invalid_n_jobs_raises_value_error() -> None:
 def test_invalid_parallel_backend_raises_value_error() -> None:
     with pytest.raises(ValueError, match="parallel_backend"):
         clean_text(pd.Series(["hello"]), parallel_backend="bad")
+
+
+def test_invalid_stopword_backend_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="stopword_backend"):
+        clean_text(pd.Series(["hello"]), stopword_backend="bad")
 
 
 def test_async_clean_text_matches_sync() -> None:

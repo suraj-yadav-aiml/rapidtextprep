@@ -5,10 +5,13 @@ from __future__ import annotations
 import re
 from collections.abc import Collection
 from functools import lru_cache
+from typing import Literal
 
 import pandas as pd
 
 from ._typing import TextInput, TextOutput
+
+StopwordBackend = Literal["regex", "flashtext"]
 
 _FALLBACK_STOP_WORDS: frozenset[str] = frozenset(
     {
@@ -138,6 +141,17 @@ def _words_to_cache_key(words: Collection[str] | None) -> tuple[str, ...]:
     )
 
 
+def _get_stopwords_to_remove(
+    keep_words_key: tuple[str, ...],
+    extra_stopwords_key: tuple[str, ...],
+) -> set[str]:
+    """Return the final stopword set after applying keep and extra words."""
+    stopwords_to_remove = set(STOPWORDS)
+    stopwords_to_remove.difference_update(keep_words_key)
+    stopwords_to_remove.update(extra_stopwords_key)
+    return {word for word in stopwords_to_remove if word}
+
+
 @lru_cache(maxsize=64)
 def _compile_stopword_removal_pattern(
     keep_words_key: tuple[str, ...],
@@ -145,12 +159,10 @@ def _compile_stopword_removal_pattern(
     ignore_case: bool,
 ) -> re.Pattern[str] | None:
     """Compile and cache a stopword removal regex pattern."""
-    stopwords_to_remove = set(STOPWORDS)
-
-    stopwords_to_remove.difference_update(keep_words_key)
-    stopwords_to_remove.update(extra_stopwords_key)
-
-    stopwords_to_remove = {word for word in stopwords_to_remove if word}
+    stopwords_to_remove = _get_stopwords_to_remove(
+        keep_words_key=keep_words_key,
+        extra_stopwords_key=extra_stopwords_key,
+    )
 
     if not stopwords_to_remove:
         return None
@@ -177,11 +189,52 @@ DEFAULT_STOPWORD_REMOVAL_PATTERN: re.Pattern[str] | None = (
 )
 
 
+@lru_cache(maxsize=64)
+def _compile_flashtext_stopword_processor(
+    keep_words_key: tuple[str, ...],
+    extra_stopwords_key: tuple[str, ...],
+    ignore_case: bool,
+):
+    """Compile and cache a FlashText keyword processor for stopword removal."""
+    try:
+        from flashtext import KeywordProcessor
+    except ImportError as exc:
+        raise ImportError(
+            "FlashText is required for stopword_backend='flashtext'. "
+            "Install it with: pip install flashtext"
+        ) from exc
+
+    stopwords_to_remove = _get_stopwords_to_remove(
+        keep_words_key=keep_words_key,
+        extra_stopwords_key=extra_stopwords_key,
+    )
+
+    if not stopwords_to_remove:
+        return None
+
+    processor = KeywordProcessor(case_sensitive=not ignore_case)
+
+    for char in ("'", "\u2019", "\u2018", "\u201b", "`", "\xb4"):
+        processor.add_non_word_boundary(char)
+
+    for word in sorted(stopwords_to_remove, key=len, reverse=True):
+        processor.add_keyword(word, " ")
+
+    return processor
+
+
+def _validate_stopword_backend(backend: StopwordBackend) -> None:
+    """Validate the stopword removal backend."""
+    if backend not in {"regex", "flashtext"}:
+        raise ValueError("stopword_backend must be 'regex' or 'flashtext'")
+
+
 def remove_stopwords(
     text: TextInput,
     keep_words: Collection[str] | None = DEFAULT_KEEP_STOPWORDS,
     extra_stopwords: Collection[str] | None = None,
     ignore_case: bool = False,
+    backend: StopwordBackend = "regex",
 ) -> TextOutput:
     """Remove stopwords from a string or pandas Series.
 
@@ -194,6 +247,9 @@ def remove_stopwords(
             all stopwords.
         extra_stopwords: Additional words to remove.
         ignore_case: Whether to remove stopwords case-insensitively.
+        backend: Stopword removal backend. Use "regex" for the original
+            pandas vectorized implementation or "flashtext" for trie-based
+            keyword replacement on large stopword lists.
 
     Returns:
         Text with stopwords removed.
@@ -202,26 +258,55 @@ def remove_stopwords(
         >>> remove_stopwords("this movie is not good but very emotional")
         ' movie  not good but very emotional'
     """
-    if (
+    _validate_stopword_backend(backend)
+
+    use_default_options = (
         keep_words is DEFAULT_KEEP_STOPWORDS
         and extra_stopwords is None
         and not ignore_case
-    ):
-        pattern = DEFAULT_STOPWORD_REMOVAL_PATTERN
+    )
+
+    if backend == "regex":
+        if use_default_options:
+            pattern = DEFAULT_STOPWORD_REMOVAL_PATTERN
+        else:
+            pattern = _compile_stopword_removal_pattern(
+                keep_words_key=_words_to_cache_key(keep_words),
+                extra_stopwords_key=_words_to_cache_key(extra_stopwords),
+                ignore_case=ignore_case,
+            )
+
+        if pattern is None:
+            return text
+
+        if isinstance(text, str):
+            return pattern.sub(" ", text)
+
+        if isinstance(text, pd.Series):
+            return text.str.replace(pattern, " ", regex=True)
+
+        raise TypeError("text must be a string or pandas Series")
+
+    if use_default_options:
+        processor = _compile_flashtext_stopword_processor(
+            keep_words_key=_words_to_cache_key(DEFAULT_KEEP_STOPWORDS),
+            extra_stopwords_key=(),
+            ignore_case=False,
+        )
     else:
-        pattern = _compile_stopword_removal_pattern(
+        processor = _compile_flashtext_stopword_processor(
             keep_words_key=_words_to_cache_key(keep_words),
             extra_stopwords_key=_words_to_cache_key(extra_stopwords),
             ignore_case=ignore_case,
         )
 
-    if pattern is None:
+    if processor is None:
         return text
 
     if isinstance(text, str):
-        return pattern.sub(" ", text)
+        return processor.replace_keywords(text)
 
     if isinstance(text, pd.Series):
-        return text.str.replace(pattern, " ", regex=True)
+        return text.map(processor.replace_keywords)
 
     raise TypeError("text must be a string or pandas Series")

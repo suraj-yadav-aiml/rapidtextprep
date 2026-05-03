@@ -48,6 +48,12 @@ def main() -> None:
         default="thread",
         help="Parallel backend used for chunked pre-lemmatization cleaning.",
     )
+    parser.add_argument(
+        "--stopword-backend",
+        choices=["regex", "flashtext"],
+        default="regex",
+        help="Stopword removal backend used inside the cleaning pipeline.",
+    )
     parser.add_argument("--lemmatize", action="store_true")
     args = parser.parse_args()
 
@@ -65,6 +71,7 @@ def main() -> None:
         text,
         chunk_size=args.chunk_size,
         n_jobs=1,
+        stopword_backend=args.stopword_backend,
         use_lemmatization=args.lemmatize,
     )
     _measure(
@@ -73,6 +80,7 @@ def main() -> None:
         chunk_size=args.chunk_size,
         n_jobs=args.n_jobs,
         parallel_backend=args.backend,
+        stopword_backend=args.stopword_backend,
         use_lemmatization=args.lemmatize,
     )
 

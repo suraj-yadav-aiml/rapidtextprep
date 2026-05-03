@@ -160,6 +160,34 @@ When `use_lemmatization=True`, rapidtextprep parallelizes the pre-lemmatization
 cleaning stages and then runs spaCy lemmatization once over the combined Series.
 This avoids sharing the cached spaCy pipeline across worker threads or processes.
 
+## FlashText Stopword Backend
+
+The default stopword backend uses the original regex implementation. For large
+custom stopword lists or longer documents, you can opt into FlashText-based
+trie matching:
+
+```python
+cleaned = clean_text(
+    texts,
+    stopword_backend="flashtext",
+)
+```
+
+You can also use it directly:
+
+```python
+from rapidtextprep import remove_stopwords
+
+text = remove_stopwords(
+    "this movie is not good but very emotional",
+    backend="flashtext",
+)
+```
+
+Use `stopword_backend="regex"` for the original pandas vectorized behavior and
+`stopword_backend="flashtext"` when benchmark results show that trie-based
+keyword replacement is faster for your data.
+
 ## Lemmatization
 
 Lemmatization uses spaCy's lookup lemmatizer:
@@ -338,6 +366,7 @@ Compare thread and process backends:
 ```bash
 uv run python benchmarks/benchmark_pipeline.py --rows 100000 --chunk-size 20000 --n-jobs 5 --backend thread --lemmatize
 uv run python benchmarks/benchmark_pipeline.py --rows 100000 --chunk-size 20000 --n-jobs 5 --backend process --lemmatize
+uv run python benchmarks/benchmark_pipeline.py --rows 100000 --chunk-size 20000 --n-jobs 5 --backend process --stopword-backend flashtext
 ```
 
 Benchmark results depend heavily on text length, CPU count, operating system,
@@ -395,6 +424,7 @@ rapidtextprep/
 - Python 3.11 or newer.
 - `numpy`
 - `pandas`
+- `flashtext`
 - `scikit-learn`
 - `spacy`
 - `spacy-lookups-data`

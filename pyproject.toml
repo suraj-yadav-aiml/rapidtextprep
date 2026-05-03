@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rapidtextprep"
-version = "0.1.1"
+version = "0.1.2"
 description = "Fast pandas-friendly text preprocessing utilities."
 readme = "README.md"
 license = "MIT"
@@ -12,6 +12,7 @@ requires-python = ">=3.11"
 dependencies = [
   "numpy",
   "pandas",
+  "flashtext",
   "scikit-learn",
   "spacy",
   "spacy-lookups-data",
