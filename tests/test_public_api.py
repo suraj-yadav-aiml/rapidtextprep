@@ -34,6 +34,9 @@ def test_existing_public_api_is_exported() -> None:
         "remove_rarewords",
         "get_complete_text_clean_up_batch",
         "clean_text_column_in_chunks",
+        "async_clean_text",
+        "async_get_complete_text_clean_up_batch",
+        "async_clean_text_column_in_chunks",
     }
 
     assert expected.issubset(set(rtp.__all__))
@@ -43,6 +46,7 @@ def test_existing_public_api_is_exported() -> None:
 
 def test_beginner_friendly_aliases_are_exported() -> None:
     assert rtp.clean_text is rtp.get_complete_text_clean_up_batch
+    assert rtp.async_clean_text is rtp.async_get_complete_text_clean_up_batch
     assert rtp.lemmatize_text is rtp.get_lemmatize_text_fast
     assert rtp.lowercase_text is rtp.get_lower_case
     assert rtp.expand_contractions is rtp.get_contraction_to_expansion

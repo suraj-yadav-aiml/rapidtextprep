@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rapidtextprep"
-version = "0.1.0"
+version = "0.1.1"
 description = "Fast pandas-friendly text preprocessing utilities."
 readme = "README.md"
 license = "MIT"
@@ -30,6 +30,7 @@ packages = ["src/rapidtextprep"]
 include = [
   "/src/rapidtextprep",
   "/tests",
+  "/benchmarks",
   "/LICENSE",
   "/README.md",
   "/pyproject.toml",

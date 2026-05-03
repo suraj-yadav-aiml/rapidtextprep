@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 from collections.abc import Collection
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from functools import partial
+from typing import Literal
 
 import pandas as pd
 
@@ -24,16 +29,40 @@ from .normalization import (
 )
 from .stopwords import DEFAULT_KEEP_STOPWORDS, remove_stopwords
 
+ParallelBackend = Literal["thread", "process"]
 
-def _clean_text_batch(
+
+def _resolve_n_jobs(n_jobs: int) -> int:
+    """Resolve the requested parallel worker count."""
+    if n_jobs == -1:
+        return os.cpu_count() or 1
+
+    if n_jobs == 0 or n_jobs < -1:
+        raise ValueError("n_jobs must be -1 or greater than 0")
+
+    return n_jobs
+
+
+def _validate_parallel_backend(parallel_backend: ParallelBackend) -> None:
+    """Validate the requested parallel execution backend."""
+    if parallel_backend not in {"thread", "process"}:
+        raise ValueError("parallel_backend must be 'thread' or 'process'")
+
+
+def _iter_series_chunks(text: pd.Series, chunk_size: int) -> list[pd.Series]:
+    """Split a Series into positional chunks."""
+    return [
+        text.iloc[start : start + chunk_size]
+        for start in range(0, len(text), chunk_size)
+    ]
+
+
+def _pre_lemmatization_clean_text_batch(
     text: TextInput,
     keep_stopwords: Collection[str] | None,
     extra_stopwords: Collection[str] | None,
-    use_lemmatization: bool,
-    lemmatize_batch_size: int,
-    n_process: int,
 ) -> TextOutput:
-    """Clean one string or one pandas Series batch."""
+    """Run text cleaning stages that are safe to apply per chunk."""
     result = get_lower_case(text)
 
     result = get_contraction_to_expansion(result)
@@ -55,6 +84,18 @@ def _clean_text_batch(
         ignore_case=False,
     )
 
+    return result
+
+
+def _finalize_clean_text(
+    text: TextOutput,
+    use_lemmatization: bool,
+    lemmatize_batch_size: int,
+    n_process: int,
+) -> TextOutput:
+    """Apply optional lemmatization and final whitespace normalization."""
+    result = text
+
     if use_lemmatization:
         result = get_lemmatize_text_fast(
             result,
@@ -67,6 +108,62 @@ def _clean_text_batch(
     return result
 
 
+def _clean_text_batch(
+    text: TextInput,
+    keep_stopwords: Collection[str] | None,
+    extra_stopwords: Collection[str] | None,
+    use_lemmatization: bool,
+    lemmatize_batch_size: int,
+    n_process: int,
+) -> TextOutput:
+    """Clean one string or one pandas Series batch."""
+    result = _pre_lemmatization_clean_text_batch(
+        text=text,
+        keep_stopwords=keep_stopwords,
+        extra_stopwords=extra_stopwords,
+    )
+
+    return _finalize_clean_text(
+        text=result,
+        use_lemmatization=use_lemmatization,
+        lemmatize_batch_size=lemmatize_batch_size,
+        n_process=n_process,
+    )
+
+
+def _clean_series_chunks(
+    text: pd.Series,
+    keep_stopwords: Collection[str] | None,
+    extra_stopwords: Collection[str] | None,
+    chunk_size: int,
+    n_jobs: int,
+    parallel_backend: ParallelBackend,
+) -> pd.Series:
+    """Clean chunkable stages for a Series, optionally using an executor."""
+    chunks = _iter_series_chunks(text, chunk_size)
+
+    if not chunks:
+        return pd.Series([], index=text.index, name=text.name, dtype=object)
+
+    worker = partial(
+        _pre_lemmatization_clean_text_batch,
+        keep_stopwords=keep_stopwords,
+        extra_stopwords=extra_stopwords,
+    )
+
+    if n_jobs == 1 or len(chunks) == 1:
+        cleaned_chunks = [worker(chunk) for chunk in chunks]
+    else:
+        max_workers = min(n_jobs, len(chunks))
+        executor_class = (
+            ThreadPoolExecutor if parallel_backend == "thread" else ProcessPoolExecutor
+        )
+        with executor_class(max_workers=max_workers) as executor:
+            cleaned_chunks = list(executor.map(worker, chunks))
+
+    return pd.concat(cleaned_chunks)
+
+
 def get_complete_text_clean_up_batch(
     text: TextInput,
     keep_stopwords: Collection[str] | None = DEFAULT_KEEP_STOPWORDS,
@@ -75,6 +172,8 @@ def get_complete_text_clean_up_batch(
     chunk_size: int | None = 100_000,
     lemmatize_batch_size: int = 5_000,
     n_process: int = 1,
+    n_jobs: int = 1,
+    parallel_backend: ParallelBackend = "thread",
 ) -> TextOutput:
     """Perform complete batched text cleaning on a string or pandas Series.
 
@@ -104,6 +203,10 @@ def get_complete_text_clean_up_batch(
             once.
         lemmatize_batch_size: Batch size used by get_lemmatize_text_fast.
         n_process: Number of spaCy processes used during lemmatization.
+        n_jobs: Number of worker threads for chunked pre-lemmatization
+            cleaning. Use 1 for sequential execution and -1 for all CPUs.
+        parallel_backend: Executor backend for chunked cleaning. Use "thread"
+            for lower overhead or "process" for CPU-bound workloads.
 
     Returns:
         Fully cleaned text. If input is a string, returns a string. If input is
@@ -114,6 +217,9 @@ def get_complete_text_clean_up_batch(
         >>> get_complete_text_clean_up_batch(raw)
         'not believe cafe percent'
     """
+    resolved_n_jobs = _resolve_n_jobs(n_jobs)
+    _validate_parallel_backend(parallel_backend)
+
     if isinstance(text, str):
         return _clean_text_batch(
             text=text,
@@ -140,23 +246,21 @@ def get_complete_text_clean_up_batch(
     if chunk_size <= 0:
         raise ValueError("chunk_size must be greater than 0")
 
-    cleaned_chunks: list[pd.Series] = []
+    result = _clean_series_chunks(
+        text=text,
+        keep_stopwords=keep_stopwords,
+        extra_stopwords=extra_stopwords,
+        chunk_size=chunk_size,
+        n_jobs=resolved_n_jobs,
+        parallel_backend=parallel_backend,
+    )
 
-    for start in range(0, len(text), chunk_size):
-        chunk = text.iloc[start : start + chunk_size]
-
-        cleaned_chunk = _clean_text_batch(
-            text=chunk,
-            keep_stopwords=keep_stopwords,
-            extra_stopwords=extra_stopwords,
-            use_lemmatization=use_lemmatization,
-            lemmatize_batch_size=lemmatize_batch_size,
-            n_process=n_process,
-        )
-
-        cleaned_chunks.append(cleaned_chunk)
-
-    return pd.concat(cleaned_chunks)
+    return _finalize_clean_text(
+        text=result,
+        use_lemmatization=use_lemmatization,
+        lemmatize_batch_size=lemmatize_batch_size,
+        n_process=n_process,
+    )
 
 
 def clean_text_column_in_chunks(
@@ -169,6 +273,8 @@ def clean_text_column_in_chunks(
     chunk_size: int = 100_000,
     lemmatize_batch_size: int = 5_000,
     n_process: int = 1,
+    n_jobs: int = 1,
+    parallel_backend: ParallelBackend = "thread",
 ) -> pd.DataFrame:
     """Clean a text column in dataframe chunks.
 
@@ -184,6 +290,10 @@ def clean_text_column_in_chunks(
         chunk_size: Number of rows to clean per chunk.
         lemmatize_batch_size: Batch size used by spaCy nlp.pipe.
         n_process: Number of spaCy processes.
+        n_jobs: Number of worker threads for chunked pre-lemmatization
+            cleaning. Use 1 for sequential execution and -1 for all CPUs.
+        parallel_backend: Executor backend for chunked cleaning. Use "thread"
+            for lower overhead or "process" for CPU-bound workloads.
 
     Returns:
         The dataframe with the cleaned text column added.
@@ -197,25 +307,82 @@ def clean_text_column_in_chunks(
     if chunk_size <= 0:
         raise ValueError("chunk_size must be greater than 0")
 
-    df[target_col] = ""
+    cleaned = get_complete_text_clean_up_batch(
+        df[source_col],
+        keep_stopwords=keep_stopwords,
+        extra_stopwords=extra_stopwords,
+        use_lemmatization=use_lemmatization,
+        chunk_size=chunk_size,
+        lemmatize_batch_size=lemmatize_batch_size,
+        n_process=n_process,
+        n_jobs=n_jobs,
+        parallel_backend=parallel_backend,
+    )
 
-    for start in range(0, len(df), chunk_size):
-        end = start + chunk_size
-        index_slice = df.index[start:end]
-
-        cleaned = get_complete_text_clean_up_batch(
-            df[source_col].iloc[start:end],
-            keep_stopwords=keep_stopwords,
-            extra_stopwords=extra_stopwords,
-            use_lemmatization=use_lemmatization,
-            chunk_size=None,
-            lemmatize_batch_size=lemmatize_batch_size,
-            n_process=n_process,
-        )
-
-        df.loc[index_slice, target_col] = cleaned.to_numpy(copy=False)
+    df[target_col] = cleaned.to_numpy(copy=False)
 
     return df
 
 
+async def async_get_complete_text_clean_up_batch(
+    text: TextInput,
+    keep_stopwords: Collection[str] | None = DEFAULT_KEEP_STOPWORDS,
+    extra_stopwords: Collection[str] | None = None,
+    use_lemmatization: bool = False,
+    chunk_size: int | None = 100_000,
+    lemmatize_batch_size: int = 5_000,
+    n_process: int = 1,
+    n_jobs: int = 1,
+    parallel_backend: ParallelBackend = "thread",
+) -> TextOutput:
+    """Run get_complete_text_clean_up_batch in the default executor."""
+    loop = asyncio.get_running_loop()
+    worker = partial(
+        get_complete_text_clean_up_batch,
+        text,
+        keep_stopwords=keep_stopwords,
+        extra_stopwords=extra_stopwords,
+        use_lemmatization=use_lemmatization,
+        chunk_size=chunk_size,
+        lemmatize_batch_size=lemmatize_batch_size,
+        n_process=n_process,
+        n_jobs=n_jobs,
+        parallel_backend=parallel_backend,
+    )
+    return await loop.run_in_executor(None, worker)
+
+
+async def async_clean_text_column_in_chunks(
+    df: pd.DataFrame,
+    source_col: str = "text",
+    target_col: str = "clean_text",
+    keep_stopwords: Collection[str] | None = DEFAULT_KEEP_STOPWORDS,
+    extra_stopwords: Collection[str] | None = None,
+    use_lemmatization: bool = False,
+    chunk_size: int = 100_000,
+    lemmatize_batch_size: int = 5_000,
+    n_process: int = 1,
+    n_jobs: int = 1,
+    parallel_backend: ParallelBackend = "thread",
+) -> pd.DataFrame:
+    """Run clean_text_column_in_chunks in the default executor."""
+    loop = asyncio.get_running_loop()
+    worker = partial(
+        clean_text_column_in_chunks,
+        df,
+        source_col=source_col,
+        target_col=target_col,
+        keep_stopwords=keep_stopwords,
+        extra_stopwords=extra_stopwords,
+        use_lemmatization=use_lemmatization,
+        chunk_size=chunk_size,
+        lemmatize_batch_size=lemmatize_batch_size,
+        n_process=n_process,
+        n_jobs=n_jobs,
+        parallel_backend=parallel_backend,
+    )
+    return await loop.run_in_executor(None, worker)
+
+
 clean_text = get_complete_text_clean_up_batch
+async_clean_text = async_get_complete_text_clean_up_batch

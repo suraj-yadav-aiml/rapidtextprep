@@ -33,6 +33,9 @@ from .normalization import (
     remove_multiple_whitespaces,
 )
 from .pipeline import (
+    async_clean_text,
+    async_clean_text_column_in_chunks,
+    async_get_complete_text_clean_up_batch,
     clean_text,
     clean_text_column_in_chunks,
     get_complete_text_clean_up_batch,
@@ -75,6 +78,9 @@ __all__ = [
     "get_complete_text_clean_up_batch",
     "clean_text_column_in_chunks",
     "clean_text",
+    "async_clean_text",
+    "async_get_complete_text_clean_up_batch",
+    "async_clean_text_column_in_chunks",
     "lemmatize_text",
     "lowercase_text",
     "expand_contractions",
