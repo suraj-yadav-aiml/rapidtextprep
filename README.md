@@ -18,6 +18,7 @@ sense.
 - HTML tag, email, URL, retweet marker, and special character removal.
 - Stopword counting and removal with sentiment-aware default keep words.
 - URL and email extraction.
+- Missing value handling for real-world pandas text columns.
 - Basic text feature generation for pandas dataframes.
 - Common and rare word removal from corpus-level word counts.
 - spaCy lookup-based lemmatization without requiring `en_core_web_sm` or
@@ -90,6 +91,7 @@ from rapidtextprep import clean_text
 
 cleaned = clean_text(
     texts,
+    handle_missing="empty",
     keep_stopwords=None,
     extra_stopwords={"example"},
     use_lemmatization=False,
@@ -111,6 +113,44 @@ The pipeline order is:
 10. Remove stopwords.
 11. Optionally lemmatize text.
 12. Normalize whitespace.
+
+## Missing Values
+
+By default, missing values are converted to empty strings so real datasets can
+be cleaned without pre-filling text columns:
+
+```python
+cleaned = clean_text(texts, handle_missing="empty")
+```
+
+Use `handle_missing="ignore"` to preserve missing values in the output, or
+`handle_missing="raise"` to fail fast when missing values are present.
+
+## Reusable Config
+
+Use `TextPrepConfig` when the same cleaning settings are reused across scripts,
+jobs, or services:
+
+```python
+from rapidtextprep import TextPrepConfig, clean_text
+
+config = TextPrepConfig(
+    handle_missing="ignore",
+    use_lemmatization=True,
+    chunk_size=20_000,
+    n_jobs=5,
+    parallel_backend="process",
+    verbose=True,
+)
+
+cleaned = clean_text(texts, config=config)
+```
+
+Explicit keyword arguments still work and can override config values:
+
+```python
+cleaned = clean_text(texts, config=config, verbose=False)
+```
 
 ## Parallel Processing
 

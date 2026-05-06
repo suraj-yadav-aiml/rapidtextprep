@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from rapidtextprep import (
+    TextPrepConfig,
     async_clean_text,
     async_clean_text_column_in_chunks,
     clean_text,
@@ -22,6 +23,88 @@ def test_complete_clean_text_string() -> None:
 def test_complete_clean_text_series() -> None:
     texts = pd.Series(["I CAN'T wait!!!", "Visit https://example.com now"])
     assert clean_text(texts, chunk_size=1).tolist() == ["cannot wait", "visit"]
+
+
+def test_clean_text_accepts_reusable_config() -> None:
+    texts = pd.Series(
+        ["I CAN'T wait!!!", None, "Visit https://example.com now"],
+        dtype=object,
+    )
+    config = TextPrepConfig(
+        chunk_size=1,
+        handle_missing="ignore",
+        extra_stopwords={"visit"},
+    )
+
+    result = clean_text(texts, config=config)
+
+    assert result.iloc[0] == "cannot wait"
+    assert pd.isna(result.iloc[1])
+    assert result.iloc[2] == ""
+
+
+def test_explicit_kwargs_override_reusable_config() -> None:
+    texts = pd.Series(["I CAN'T wait!!!", None], dtype=object)
+    config = TextPrepConfig(handle_missing="raise")
+
+    result = clean_text(texts, config=config, handle_missing="empty")
+
+    assert result.tolist() == ["cannot wait", ""]
+
+
+def test_clean_text_converts_missing_values_to_empty_strings_by_default() -> None:
+    texts = pd.Series(
+        ["I CAN'T wait!!!", None, pd.NA, "Visit https://example.com now"],
+        index=[10, 20, 30, 40],
+        dtype=object,
+    )
+
+    result = clean_text(texts, chunk_size=2)
+
+    assert result.tolist() == ["cannot wait", "", "", "visit"]
+    assert result.index.tolist() == [10, 20, 30, 40]
+
+
+def test_clean_text_can_preserve_missing_values() -> None:
+    texts = pd.Series(
+        ["I CAN'T wait!!!", None, pd.NA, "Visit https://example.com now"],
+        index=[10, 20, 30, 40],
+        dtype=object,
+    )
+
+    result = clean_text(texts, chunk_size=2, handle_missing="ignore")
+
+    assert result.loc[10] == "cannot wait"
+    assert pd.isna(result.loc[20])
+    assert pd.isna(result.loc[30])
+    assert result.loc[40] == "visit"
+
+
+def test_clean_text_can_raise_for_missing_values() -> None:
+    texts = pd.Series(["hello", None], dtype=object)
+
+    with pytest.raises(ValueError, match="missing values"):
+        clean_text(texts, handle_missing="raise")
+
+
+def test_clean_text_handles_missing_scalar_values() -> None:
+    assert clean_text(None) == ""
+    assert clean_text(None, handle_missing="ignore") is None
+
+    with pytest.raises(ValueError, match="missing"):
+        clean_text(None, handle_missing="raise")
+
+
+def test_lemmatized_clean_text_handles_missing_values() -> None:
+    texts = pd.Series(["cars were running faster", None], dtype=object)
+
+    result = clean_text(
+        texts,
+        chunk_size=1,
+        use_lemmatization=True,
+    )
+
+    assert result.tolist() == ["car run fast", ""]
 
 
 def test_clean_text_is_silent_by_default(
@@ -43,6 +126,7 @@ def test_verbose_clean_text_outputs_summary(
     assert "rapidtextprep clean_text" in captured.out
     assert "Input" in captured.out
     assert "Stages" in captured.out
+    assert "handle_missing" in captured.out
     assert "[1/3] Pre-lemmatization cleaning started" in captured.out
     assert "[2/3] spaCy lemmatization skipped" in captured.out
     assert "[3/3] Whitespace normalization done" in captured.out
@@ -224,6 +308,11 @@ def test_invalid_stopword_backend_raises_value_error() -> None:
         clean_text(pd.Series(["hello"]), stopword_backend="bad")
 
 
+def test_invalid_handle_missing_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="handle_missing"):
+        clean_text(pd.Series(["hello"]), handle_missing="bad")
+
+
 def test_async_clean_text_matches_sync() -> None:
     texts = pd.Series(["I CAN'T wait!!!", "Visit https://example.com now"])
 
@@ -243,6 +332,16 @@ def test_async_clean_text_matches_sync() -> None:
     )
 
     pd.testing.assert_series_equal(async_result, sync_result)
+
+
+def test_async_clean_text_accepts_reusable_config() -> None:
+    texts = pd.Series(["I CAN'T wait!!!", None], dtype=object)
+    config = TextPrepConfig(chunk_size=1, handle_missing="ignore")
+
+    result = asyncio.run(async_clean_text(texts, config=config))
+
+    assert result.iloc[0] == "cannot wait"
+    assert pd.isna(result.iloc[1])
 
 
 def test_async_verbose_clean_text_outputs_summary(
@@ -277,3 +376,26 @@ def test_async_clean_text_column_in_chunks() -> None:
     )
 
     assert result["clean_text"].tolist() == ["cannot wait", "retweet user hello"]
+
+
+def test_clean_text_column_in_chunks_preserves_missing_values() -> None:
+    df = pd.DataFrame({"text": ["I CAN'T wait!!!", None]})
+
+    result = clean_text_column_in_chunks(
+        df,
+        chunk_size=1,
+        handle_missing="ignore",
+    )
+
+    assert result["clean_text"].iloc[0] == "cannot wait"
+    assert pd.isna(result["clean_text"].iloc[1])
+
+
+def test_clean_text_column_in_chunks_accepts_reusable_config() -> None:
+    df = pd.DataFrame({"text": ["I CAN'T wait!!!", None]})
+    config = TextPrepConfig(chunk_size=1, handle_missing="ignore")
+
+    result = clean_text_column_in_chunks(df, config=config)
+
+    assert result["clean_text"].iloc[0] == "cannot wait"
+    assert pd.isna(result["clean_text"].iloc[1])

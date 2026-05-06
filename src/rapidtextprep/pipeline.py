@@ -7,8 +7,9 @@ import os
 import time
 from collections.abc import Collection
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from functools import partial
-from typing import Literal
+from typing import TypeVar, cast
 
 import pandas as pd
 
@@ -20,6 +21,7 @@ from .cleaning import (
     remove_special_characters,
     remove_urls,
 )
+from .config import MissingValueStrategy, ParallelBackend, TextPrepConfig
 from .lemmatization import get_lemmatize_text_fast
 from .normalization import (
     get_contraction_to_expansion,
@@ -28,9 +30,54 @@ from .normalization import (
     remove_accented_chars,
     remove_multiple_whitespaces,
 )
-from .stopwords import DEFAULT_KEEP_STOPWORDS, StopwordBackend, remove_stopwords
+from .stopwords import StopwordBackend, remove_stopwords
 
-ParallelBackend = Literal["thread", "process"]
+_UNSET = object()
+_T = TypeVar("_T")
+
+
+def _config_value(value: object, config_value: _T) -> _T:
+    """Return an explicit argument value or the configured value."""
+    if value is _UNSET:
+        return config_value
+
+    return cast(_T, value)
+
+
+def _resolve_text_prep_config(
+    config: TextPrepConfig | None,
+    *,
+    keep_stopwords: object,
+    extra_stopwords: object,
+    stopword_backend: object,
+    handle_missing: object,
+    use_lemmatization: object,
+    chunk_size: object,
+    lemmatize_batch_size: object,
+    n_process: object,
+    n_jobs: object,
+    parallel_backend: object,
+    verbose: object,
+) -> TextPrepConfig:
+    """Merge an optional config object with explicit keyword overrides."""
+    base = config or TextPrepConfig()
+    return replace(
+        base,
+        keep_stopwords=_config_value(keep_stopwords, base.keep_stopwords),
+        extra_stopwords=_config_value(extra_stopwords, base.extra_stopwords),
+        stopword_backend=_config_value(stopword_backend, base.stopword_backend),
+        handle_missing=_config_value(handle_missing, base.handle_missing),
+        use_lemmatization=_config_value(use_lemmatization, base.use_lemmatization),
+        chunk_size=_config_value(chunk_size, base.chunk_size),
+        lemmatize_batch_size=_config_value(
+            lemmatize_batch_size,
+            base.lemmatize_batch_size,
+        ),
+        n_process=_config_value(n_process, base.n_process),
+        n_jobs=_config_value(n_jobs, base.n_jobs),
+        parallel_backend=_config_value(parallel_backend, base.parallel_backend),
+        verbose=_config_value(verbose, base.verbose),
+    )
 
 
 class _VerboseReporter:
@@ -47,7 +94,9 @@ class _VerboseReporter:
         rows: int,
         chunk_size: object,
         chunks: object,
+        missing_values: int,
         stopword_backend: str,
+        handle_missing: str,
         parallel_backend: object,
         n_jobs: object,
         use_lemmatization: bool,
@@ -64,10 +113,12 @@ class _VerboseReporter:
         self._field("rows", rows)
         self._field("chunk_size", chunk_size)
         self._field("chunks", chunks)
+        self._field("missing_values", missing_values)
 
         self._print("")
         self._print("Processing")
         self._field("stopword_backend", stopword_backend)
+        self._field("handle_missing", handle_missing)
         self._field("parallel_backend", parallel_backend)
         self._field("n_jobs", n_jobs)
         self._field("lemmatization", "enabled" if use_lemmatization else "disabled")
@@ -148,6 +199,61 @@ def _validate_stopword_backend(stopword_backend: StopwordBackend) -> None:
     """Validate the requested stopword removal backend."""
     if stopword_backend not in {"regex", "flashtext"}:
         raise ValueError("stopword_backend must be 'regex' or 'flashtext'")
+
+
+def _validate_handle_missing(handle_missing: MissingValueStrategy) -> None:
+    """Validate the requested missing value strategy."""
+    if handle_missing not in {"empty", "ignore", "raise"}:
+        raise ValueError("handle_missing must be 'empty', 'ignore', or 'raise'")
+
+
+def _is_missing_scalar(value: object) -> bool:
+    """Return True when a scalar input is a pandas-style missing value."""
+    if isinstance(value, str | pd.Series):
+        return False
+
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _prepare_series_missing_values(
+    text: pd.Series,
+    handle_missing: MissingValueStrategy,
+) -> tuple[pd.Series, pd.Series | None, int]:
+    """Prepare Series missing values before running string operations."""
+    missing_mask = text.isna()
+    missing_count = int(missing_mask.sum())
+
+    if missing_count == 0:
+        return text, None, 0
+
+    if handle_missing == "raise":
+        raise ValueError(
+            "text contains missing values; use handle_missing='empty' or "
+            "handle_missing='ignore'"
+        )
+
+    prepared = text.fillna("")
+    if handle_missing == "ignore":
+        return prepared, missing_mask, missing_count
+
+    return prepared, None, missing_count
+
+
+def _restore_ignored_missing_values(
+    result: pd.Series,
+    original_text: pd.Series,
+    missing_mask: pd.Series | None,
+) -> pd.Series:
+    """Restore original missing values when handle_missing='ignore'."""
+    if missing_mask is None:
+        return result
+
+    restored = result.astype(object).copy()
+    restored.loc[missing_mask] = original_text.loc[missing_mask]
+    return restored
 
 
 def _iter_series_chunks(text: pd.Series, chunk_size: int) -> list[pd.Series]:
@@ -361,18 +467,20 @@ def _clean_series_chunks(
 
 
 def get_complete_text_clean_up_batch(
-    text: TextInput,
-    keep_stopwords: Collection[str] | None = DEFAULT_KEEP_STOPWORDS,
-    extra_stopwords: Collection[str] | None = None,
-    stopword_backend: StopwordBackend = "regex",
-    use_lemmatization: bool = False,
-    chunk_size: int | None = 100_000,
-    lemmatize_batch_size: int = 5_000,
-    n_process: int = 1,
-    n_jobs: int = 1,
-    parallel_backend: ParallelBackend = "thread",
-    verbose: bool = False,
-) -> TextOutput:
+    text: TextInput | None,
+    keep_stopwords: Collection[str] | None | object = _UNSET,
+    extra_stopwords: Collection[str] | None | object = _UNSET,
+    stopword_backend: StopwordBackend | object = _UNSET,
+    handle_missing: MissingValueStrategy | object = _UNSET,
+    use_lemmatization: bool | object = _UNSET,
+    chunk_size: int | None | object = _UNSET,
+    lemmatize_batch_size: int | object = _UNSET,
+    n_process: int | object = _UNSET,
+    n_jobs: int | object = _UNSET,
+    parallel_backend: ParallelBackend | object = _UNSET,
+    verbose: bool | object = _UNSET,
+    config: TextPrepConfig | None = None,
+) -> TextOutput | None:
     """Perform complete batched text cleaning on a string or pandas Series.
 
     Pipeline order:
@@ -390,13 +498,16 @@ def get_complete_text_clean_up_batch(
         12. Remove multiple consecutive whitespaces.
 
     Args:
-        text: A single text string or pandas Series containing non-null text.
+        text: A single text string or pandas Series.
         keep_stopwords: Stopwords to keep during stopword removal. Defaults to
             DEFAULT_KEEP_STOPWORDS. Use None to remove all stopwords.
         extra_stopwords: Additional words to remove along with STOPWORDS.
         stopword_backend: Stopword removal backend. Use "regex" for the
             original pandas vectorized implementation or "flashtext" for
             trie-based keyword replacement on large stopword lists.
+        handle_missing: Missing value strategy. Use "empty" to convert missing
+            values to empty strings, "ignore" to preserve missing values in the
+            output, or "raise" to fail when missing values are present.
         use_lemmatization: Whether to apply fast lookup-based lemmatization.
             Defaults to False.
         chunk_size: Number of rows to process per chunk for pandas Series
@@ -409,6 +520,8 @@ def get_complete_text_clean_up_batch(
         parallel_backend: Executor backend for chunked cleaning. Use "thread"
             for lower overhead or "process" for CPU-bound workloads.
         verbose: Whether to print human-readable progress information.
+        config: Optional reusable configuration. Explicit keyword arguments
+            override matching values from this config.
 
     Returns:
         Fully cleaned text. If input is a string, returns a string. If input is
@@ -419,10 +532,38 @@ def get_complete_text_clean_up_batch(
         >>> get_complete_text_clean_up_batch(raw)
         'not believe cafe percent'
     """
-    resolved_n_jobs = _resolve_n_jobs(n_jobs)
-    _validate_parallel_backend(parallel_backend)
-    _validate_stopword_backend(stopword_backend)
-    reporter = _VerboseReporter(verbose)
+    settings = _resolve_text_prep_config(
+        config,
+        keep_stopwords=keep_stopwords,
+        extra_stopwords=extra_stopwords,
+        stopword_backend=stopword_backend,
+        handle_missing=handle_missing,
+        use_lemmatization=use_lemmatization,
+        chunk_size=chunk_size,
+        lemmatize_batch_size=lemmatize_batch_size,
+        n_process=n_process,
+        n_jobs=n_jobs,
+        parallel_backend=parallel_backend,
+        verbose=verbose,
+    )
+    resolved_n_jobs = _resolve_n_jobs(settings.n_jobs)
+    _validate_parallel_backend(settings.parallel_backend)
+    _validate_stopword_backend(settings.stopword_backend)
+    _validate_handle_missing(settings.handle_missing)
+    reporter = _VerboseReporter(settings.verbose)
+
+    scalar_missing_count = 0
+    if _is_missing_scalar(text):
+        if settings.handle_missing == "raise":
+            raise ValueError(
+                "text is missing; use handle_missing='empty' or handle_missing='ignore'"
+            )
+
+        if settings.handle_missing == "ignore":
+            return text
+
+        text = ""
+        scalar_missing_count = 1
 
     if isinstance(text, str):
         reporter.start_run(
@@ -430,20 +571,22 @@ def get_complete_text_clean_up_batch(
             rows=1,
             chunk_size="not used",
             chunks="not used",
-            stopword_backend=stopword_backend,
+            missing_values=scalar_missing_count,
+            stopword_backend=settings.stopword_backend,
+            handle_missing=settings.handle_missing,
             parallel_backend="not used",
             n_jobs="not used",
-            use_lemmatization=use_lemmatization,
-            n_process=n_process,
+            use_lemmatization=settings.use_lemmatization,
+            n_process=settings.n_process,
         )
         result = _clean_text_batch(
             text=text,
-            keep_stopwords=keep_stopwords,
-            extra_stopwords=extra_stopwords,
-            stopword_backend=stopword_backend,
-            use_lemmatization=use_lemmatization,
-            lemmatize_batch_size=lemmatize_batch_size,
-            n_process=n_process,
+            keep_stopwords=settings.keep_stopwords,
+            extra_stopwords=settings.extra_stopwords,
+            stopword_backend=settings.stopword_backend,
+            use_lemmatization=settings.use_lemmatization,
+            lemmatize_batch_size=settings.lemmatize_batch_size,
+            n_process=settings.n_process,
             reporter=reporter,
         )
         reporter.done(rows=1)
@@ -452,58 +595,75 @@ def get_complete_text_clean_up_batch(
     if not isinstance(text, pd.Series):
         raise TypeError("text must be a string or pandas Series")
 
-    if chunk_size is None:
+    original_text = text
+    text, missing_mask, missing_count = _prepare_series_missing_values(
+        text,
+        settings.handle_missing,
+    )
+
+    if settings.chunk_size is None:
         reporter.start_run(
             input_type="pandas.Series",
             rows=len(text),
             chunk_size="None (no chunking)",
             chunks=1 if len(text) else 0,
-            stopword_backend=stopword_backend,
+            missing_values=missing_count,
+            stopword_backend=settings.stopword_backend,
+            handle_missing=settings.handle_missing,
             parallel_backend="not used",
             n_jobs="not used",
-            use_lemmatization=use_lemmatization,
-            n_process=n_process,
+            use_lemmatization=settings.use_lemmatization,
+            n_process=settings.n_process,
         )
         result = _clean_text_batch(
             text=text,
-            keep_stopwords=keep_stopwords,
-            extra_stopwords=extra_stopwords,
-            stopword_backend=stopword_backend,
-            use_lemmatization=use_lemmatization,
-            lemmatize_batch_size=lemmatize_batch_size,
-            n_process=n_process,
+            keep_stopwords=settings.keep_stopwords,
+            extra_stopwords=settings.extra_stopwords,
+            stopword_backend=settings.stopword_backend,
+            use_lemmatization=settings.use_lemmatization,
+            lemmatize_batch_size=settings.lemmatize_batch_size,
+            n_process=settings.n_process,
             reporter=reporter,
+        )
+        result = _restore_ignored_missing_values(
+            result,
+            original_text=original_text,
+            missing_mask=missing_mask,
         )
         reporter.done(rows=len(text))
         return result
 
-    if chunk_size <= 0:
+    if settings.chunk_size <= 0:
         raise ValueError("chunk_size must be greater than 0")
 
-    chunk_count = _count_series_chunks(text, chunk_size)
+    chunk_count = _count_series_chunks(text, settings.chunk_size)
     reporter.start_run(
         input_type="pandas.Series",
         rows=len(text),
-        chunk_size=chunk_size,
+        chunk_size=settings.chunk_size,
         chunks=chunk_count,
-        stopword_backend=stopword_backend,
+        missing_values=missing_count,
+        stopword_backend=settings.stopword_backend,
+        handle_missing=settings.handle_missing,
         parallel_backend=(
-            parallel_backend if chunk_count > 1 and resolved_n_jobs > 1 else "not used"
+            settings.parallel_backend
+            if chunk_count > 1 and resolved_n_jobs > 1
+            else "not used"
         ),
         n_jobs=resolved_n_jobs if chunk_count > 1 else "not used",
-        use_lemmatization=use_lemmatization,
-        n_process=n_process,
+        use_lemmatization=settings.use_lemmatization,
+        n_process=settings.n_process,
     )
     reporter.stage_started(1, 3, "Pre-lemmatization cleaning")
     started_at = time.perf_counter()
     result = _clean_series_chunks(
         text=text,
-        keep_stopwords=keep_stopwords,
-        extra_stopwords=extra_stopwords,
-        stopword_backend=stopword_backend,
-        chunk_size=chunk_size,
+        keep_stopwords=settings.keep_stopwords,
+        extra_stopwords=settings.extra_stopwords,
+        stopword_backend=settings.stopword_backend,
+        chunk_size=settings.chunk_size,
         n_jobs=resolved_n_jobs,
-        parallel_backend=parallel_backend,
+        parallel_backend=settings.parallel_backend,
         reporter=reporter,
     )
     reporter.stage_done(
@@ -515,10 +675,15 @@ def get_complete_text_clean_up_batch(
 
     result = _finalize_clean_text(
         text=result,
-        use_lemmatization=use_lemmatization,
-        lemmatize_batch_size=lemmatize_batch_size,
-        n_process=n_process,
+        use_lemmatization=settings.use_lemmatization,
+        lemmatize_batch_size=settings.lemmatize_batch_size,
+        n_process=settings.n_process,
         reporter=reporter,
+    )
+    result = _restore_ignored_missing_values(
+        result,
+        original_text=original_text,
+        missing_mask=missing_mask,
     )
     reporter.done(rows=len(text))
     return result
@@ -528,16 +693,18 @@ def clean_text_column_in_chunks(
     df: pd.DataFrame,
     source_col: str = "text",
     target_col: str = "clean_text",
-    keep_stopwords: Collection[str] | None = DEFAULT_KEEP_STOPWORDS,
-    extra_stopwords: Collection[str] | None = None,
-    stopword_backend: StopwordBackend = "regex",
-    use_lemmatization: bool = False,
-    chunk_size: int = 100_000,
-    lemmatize_batch_size: int = 5_000,
-    n_process: int = 1,
-    n_jobs: int = 1,
-    parallel_backend: ParallelBackend = "thread",
-    verbose: bool = False,
+    keep_stopwords: Collection[str] | None | object = _UNSET,
+    extra_stopwords: Collection[str] | None | object = _UNSET,
+    stopword_backend: StopwordBackend | object = _UNSET,
+    handle_missing: MissingValueStrategy | object = _UNSET,
+    use_lemmatization: bool | object = _UNSET,
+    chunk_size: int | object = _UNSET,
+    lemmatize_batch_size: int | object = _UNSET,
+    n_process: int | object = _UNSET,
+    n_jobs: int | object = _UNSET,
+    parallel_backend: ParallelBackend | object = _UNSET,
+    verbose: bool | object = _UNSET,
+    config: TextPrepConfig | None = None,
 ) -> pd.DataFrame:
     """Clean a text column in dataframe chunks.
 
@@ -553,6 +720,9 @@ def clean_text_column_in_chunks(
         stopword_backend: Stopword removal backend. Use "regex" for the
             original pandas vectorized implementation or "flashtext" for
             trie-based keyword replacement on large stopword lists.
+        handle_missing: Missing value strategy. Use "empty" to convert missing
+            values to empty strings, "ignore" to preserve missing values in the
+            output, or "raise" to fail when missing values are present.
         use_lemmatization: Whether to apply fast lookup lemmatization.
         chunk_size: Number of rows to clean per chunk.
         lemmatize_batch_size: Batch size used by spaCy nlp.pipe.
@@ -562,6 +732,8 @@ def clean_text_column_in_chunks(
         parallel_backend: Executor backend for chunked cleaning. Use "thread"
             for lower overhead or "process" for CPU-bound workloads.
         verbose: Whether to print human-readable progress information.
+        config: Optional reusable configuration. Explicit keyword arguments
+            override matching values from this config.
 
     Returns:
         The dataframe with the cleaned text column added.
@@ -572,14 +744,12 @@ def clean_text_column_in_chunks(
     if source_col not in df.columns:
         raise KeyError(f"{source_col!r} column not found in dataframe")
 
-    if chunk_size <= 0:
-        raise ValueError("chunk_size must be greater than 0")
-
-    cleaned = get_complete_text_clean_up_batch(
-        df[source_col],
+    settings = _resolve_text_prep_config(
+        config,
         keep_stopwords=keep_stopwords,
         extra_stopwords=extra_stopwords,
         stopword_backend=stopword_backend,
+        handle_missing=handle_missing,
         use_lemmatization=use_lemmatization,
         chunk_size=chunk_size,
         lemmatize_batch_size=lemmatize_batch_size,
@@ -587,6 +757,17 @@ def clean_text_column_in_chunks(
         n_jobs=n_jobs,
         parallel_backend=parallel_backend,
         verbose=verbose,
+    )
+
+    if settings.chunk_size is None:
+        raise ValueError("chunk_size must be greater than 0")
+
+    if settings.chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than 0")
+
+    cleaned = get_complete_text_clean_up_batch(
+        df[source_col],
+        config=settings,
     )
 
     df[target_col] = cleaned.to_numpy(copy=False)
@@ -595,18 +776,20 @@ def clean_text_column_in_chunks(
 
 
 async def async_get_complete_text_clean_up_batch(
-    text: TextInput,
-    keep_stopwords: Collection[str] | None = DEFAULT_KEEP_STOPWORDS,
-    extra_stopwords: Collection[str] | None = None,
-    stopword_backend: StopwordBackend = "regex",
-    use_lemmatization: bool = False,
-    chunk_size: int | None = 100_000,
-    lemmatize_batch_size: int = 5_000,
-    n_process: int = 1,
-    n_jobs: int = 1,
-    parallel_backend: ParallelBackend = "thread",
-    verbose: bool = False,
-) -> TextOutput:
+    text: TextInput | None,
+    keep_stopwords: Collection[str] | None | object = _UNSET,
+    extra_stopwords: Collection[str] | None | object = _UNSET,
+    stopword_backend: StopwordBackend | object = _UNSET,
+    handle_missing: MissingValueStrategy | object = _UNSET,
+    use_lemmatization: bool | object = _UNSET,
+    chunk_size: int | None | object = _UNSET,
+    lemmatize_batch_size: int | object = _UNSET,
+    n_process: int | object = _UNSET,
+    n_jobs: int | object = _UNSET,
+    parallel_backend: ParallelBackend | object = _UNSET,
+    verbose: bool | object = _UNSET,
+    config: TextPrepConfig | None = None,
+) -> TextOutput | None:
     """Run get_complete_text_clean_up_batch in the default executor."""
     loop = asyncio.get_running_loop()
     worker = partial(
@@ -615,6 +798,7 @@ async def async_get_complete_text_clean_up_batch(
         keep_stopwords=keep_stopwords,
         extra_stopwords=extra_stopwords,
         stopword_backend=stopword_backend,
+        handle_missing=handle_missing,
         use_lemmatization=use_lemmatization,
         chunk_size=chunk_size,
         lemmatize_batch_size=lemmatize_batch_size,
@@ -622,6 +806,7 @@ async def async_get_complete_text_clean_up_batch(
         n_jobs=n_jobs,
         parallel_backend=parallel_backend,
         verbose=verbose,
+        config=config,
     )
     return await loop.run_in_executor(None, worker)
 
@@ -630,16 +815,18 @@ async def async_clean_text_column_in_chunks(
     df: pd.DataFrame,
     source_col: str = "text",
     target_col: str = "clean_text",
-    keep_stopwords: Collection[str] | None = DEFAULT_KEEP_STOPWORDS,
-    extra_stopwords: Collection[str] | None = None,
-    stopword_backend: StopwordBackend = "regex",
-    use_lemmatization: bool = False,
-    chunk_size: int = 100_000,
-    lemmatize_batch_size: int = 5_000,
-    n_process: int = 1,
-    n_jobs: int = 1,
-    parallel_backend: ParallelBackend = "thread",
-    verbose: bool = False,
+    keep_stopwords: Collection[str] | None | object = _UNSET,
+    extra_stopwords: Collection[str] | None | object = _UNSET,
+    stopword_backend: StopwordBackend | object = _UNSET,
+    handle_missing: MissingValueStrategy | object = _UNSET,
+    use_lemmatization: bool | object = _UNSET,
+    chunk_size: int | object = _UNSET,
+    lemmatize_batch_size: int | object = _UNSET,
+    n_process: int | object = _UNSET,
+    n_jobs: int | object = _UNSET,
+    parallel_backend: ParallelBackend | object = _UNSET,
+    verbose: bool | object = _UNSET,
+    config: TextPrepConfig | None = None,
 ) -> pd.DataFrame:
     """Run clean_text_column_in_chunks in the default executor."""
     loop = asyncio.get_running_loop()
@@ -651,6 +838,7 @@ async def async_clean_text_column_in_chunks(
         keep_stopwords=keep_stopwords,
         extra_stopwords=extra_stopwords,
         stopword_backend=stopword_backend,
+        handle_missing=handle_missing,
         use_lemmatization=use_lemmatization,
         chunk_size=chunk_size,
         lemmatize_batch_size=lemmatize_batch_size,
@@ -658,6 +846,7 @@ async def async_clean_text_column_in_chunks(
         n_jobs=n_jobs,
         parallel_backend=parallel_backend,
         verbose=verbose,
+        config=config,
     )
     return await loop.run_in_executor(None, worker)
 

@@ -9,6 +9,7 @@ from .cleaning import (
     remove_special_characters,
     remove_urls,
 )
+from .config import TextPrepConfig
 from .extraction import get_email, get_urls
 from .features import (
     get_avg_wordlength,
@@ -50,6 +51,7 @@ from .stopwords import (
 __all__ = [
     "STOPWORDS",
     "DEFAULT_KEEP_STOPWORDS",
+    "TextPrepConfig",
     "get_lower_case",
     "get_word_count",
     "get_char_count",
