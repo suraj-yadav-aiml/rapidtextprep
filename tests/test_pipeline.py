@@ -24,6 +24,35 @@ def test_complete_clean_text_series() -> None:
     assert clean_text(texts, chunk_size=1).tolist() == ["cannot wait", "visit"]
 
 
+def test_clean_text_is_silent_by_default(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert clean_text("I CAN'T wait!!!") == "cannot wait"
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+
+def test_verbose_clean_text_outputs_summary(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = clean_text("I CAN'T wait!!!", verbose=True)
+
+    captured = capsys.readouterr()
+    assert result == "cannot wait"
+    assert "rapidtextprep clean_text" in captured.out
+    assert "Input" in captured.out
+    assert "Stages" in captured.out
+    assert "[1/3] Pre-lemmatization cleaning started" in captured.out
+    assert "[2/3] spaCy lemmatization skipped" in captured.out
+    assert "[3/3] Whitespace normalization done" in captured.out
+    assert "done in 0m " in captured.out
+    assert "Done" in captured.out
+    assert "total_time" in captured.out
+    assert " min)" in captured.out
+    assert "rows_per_second" in captured.out
+
+
 def test_clean_text_column_in_chunks() -> None:
     df = pd.DataFrame({"text": ["I CAN'T wait!!!", "RT @user: hello"]})
     result = clean_text_column_in_chunks(df, chunk_size=1)
@@ -51,6 +80,29 @@ def test_parallel_clean_text_matches_sequential() -> None:
     threaded = clean_text(texts, chunk_size=2, n_jobs=3)
 
     pd.testing.assert_series_equal(threaded, sequential)
+
+
+def test_verbose_threaded_clean_text_matches_sequential(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    texts = pd.Series(
+        [
+            "I CAN'T wait!!!",
+            "Visit https://example.com now",
+            "RT @user: hello #NLP",
+            "<p>This is VERY good</p>",
+        ],
+        index=[10, 20, 30, 40],
+    )
+
+    sequential = clean_text(texts, chunk_size=2, n_jobs=1)
+    threaded = clean_text(texts, chunk_size=2, n_jobs=2, verbose=True)
+
+    captured = capsys.readouterr()
+    pd.testing.assert_series_equal(threaded, sequential)
+    assert "parallel_backend  : thread" in captured.out
+    assert "chunk " in captured.out
+    assert "Done" in captured.out
 
 
 def test_flashtext_stopword_backend_matches_regex_pipeline() -> None:
@@ -90,6 +142,35 @@ def test_process_parallel_clean_text_matches_sequential() -> None:
     )
 
     pd.testing.assert_series_equal(processed, sequential)
+
+
+def test_verbose_process_clean_text_matches_sequential(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    texts = pd.Series(
+        [
+            "I CAN'T wait!!!",
+            "Visit https://example.com now",
+            "RT @user: hello #NLP",
+            "<p>This is VERY good</p>",
+        ],
+        index=[10, 20, 30, 40],
+    )
+
+    sequential = clean_text(texts, chunk_size=2, n_jobs=1)
+    processed = clean_text(
+        texts,
+        chunk_size=2,
+        n_jobs=2,
+        parallel_backend="process",
+        verbose=True,
+    )
+
+    captured = capsys.readouterr()
+    pd.testing.assert_series_equal(processed, sequential)
+    assert "parallel_backend  : process" in captured.out
+    assert "chunk " in captured.out
+    assert "Done" in captured.out
 
 
 def test_parallel_lemmatized_clean_text_matches_sequential() -> None:
@@ -162,6 +243,25 @@ def test_async_clean_text_matches_sync() -> None:
     )
 
     pd.testing.assert_series_equal(async_result, sync_result)
+
+
+def test_async_verbose_clean_text_outputs_summary(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    texts = pd.Series(["I CAN'T wait!!!", "Visit https://example.com now"])
+
+    result = asyncio.run(
+        async_clean_text(
+            texts,
+            chunk_size=1,
+            verbose=True,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert result.tolist() == ["cannot wait", "visit"]
+    assert "rapidtextprep clean_text" in captured.out
+    assert "Done" in captured.out
 
 
 def test_async_clean_text_column_in_chunks() -> None:

@@ -160,6 +160,25 @@ When `use_lemmatization=True`, rapidtextprep parallelizes the pre-lemmatization
 cleaning stages and then runs spaCy lemmatization once over the combined Series.
 This avoids sharing the cached spaCy pipeline across worker threads or processes.
 
+## Verbose Progress
+
+Use `verbose=True` when you want readable progress information for a large
+cleaning run:
+
+```python
+cleaned = clean_text(
+    texts,
+    chunk_size=20_000,
+    n_jobs=5,
+    parallel_backend="process",
+    use_lemmatization=True,
+    verbose=True,
+)
+```
+
+The output is printed by the parent process and includes input size, backend
+configuration, stage timing, chunk completion, total time, and rows per second.
+
 ## FlashText Stopword Backend
 
 The default stopword backend uses the original regex implementation. For large
