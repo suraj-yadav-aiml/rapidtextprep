@@ -21,6 +21,8 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "mkdocs-material",
+  "mkdocstrings[python]",
   "pytest",
   "ruff",
 ]
@@ -33,7 +35,9 @@ include = [
   "/src/rapidtextprep",
   "/tests",
   "/benchmarks",
+  "/docs",
   "/LICENSE",
+  "/mkdocs.yml",
   "/README.md",
   "/pyproject.toml",
 ]
