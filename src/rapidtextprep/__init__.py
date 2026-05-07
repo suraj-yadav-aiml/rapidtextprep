@@ -47,11 +47,13 @@ from .stopwords import (
     get_stopwords_count,
     remove_stopwords,
 )
+from .transformers import TextPreprocessor
 
 __all__ = [
     "STOPWORDS",
     "DEFAULT_KEEP_STOPWORDS",
     "TextPrepConfig",
+    "TextPreprocessor",
     "get_lower_case",
     "get_word_count",
     "get_char_count",

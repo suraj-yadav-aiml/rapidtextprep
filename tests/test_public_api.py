@@ -8,6 +8,7 @@ def test_existing_public_api_is_exported() -> None:
         "STOPWORDS",
         "DEFAULT_KEEP_STOPWORDS",
         "TextPrepConfig",
+        "TextPreprocessor",
         "get_lower_case",
         "get_word_count",
         "get_char_count",

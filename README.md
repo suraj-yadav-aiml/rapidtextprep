@@ -26,6 +26,7 @@ sense.
 - Chunked processing for large pandas Series.
 - Optional thread or process based parallel chunk cleaning.
 - Async wrapper functions for async applications.
+- scikit-learn transformer for ML pipelines.
 
 ## Installation
 
@@ -150,6 +151,34 @@ Explicit keyword arguments still work and can override config values:
 
 ```python
 cleaned = clean_text(texts, config=config, verbose=False)
+```
+
+## scikit-learn Pipeline
+
+Use `TextPreprocessor` before vectorizers in scikit-learn pipelines:
+
+```python
+from rapidtextprep import TextPreprocessor
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+
+model = Pipeline(
+    [
+        ("cleaner", TextPreprocessor(handle_missing="empty")),
+        ("tfidf", TfidfVectorizer()),
+        ("classifier", LogisticRegression()),
+    ]
+)
+
+model.fit(texts, labels)
+predictions = model.predict(new_texts)
+```
+
+It also works as a standalone transformer:
+
+```python
+cleaned = TextPreprocessor().fit_transform(texts)
 ```
 
 ## Parallel Processing

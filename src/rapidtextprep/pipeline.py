@@ -6,12 +6,13 @@ import asyncio
 import os
 import time
 from collections.abc import Collection
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from functools import partial
 from typing import TypeVar, cast
 
 import pandas as pd
+from joblib import Parallel, delayed
 
 from ._typing import TextInput, TextOutput
 from .cleaning import (
@@ -433,12 +434,9 @@ def _clean_series_chunks(
                 )
         else:
             cleaned_chunks = [worker(chunk) for chunk in chunks]
-    else:
+    elif parallel_backend == "thread":
         max_workers = min(n_jobs, len(chunks))
-        executor_class = (
-            ThreadPoolExecutor if parallel_backend == "thread" else ProcessPoolExecutor
-        )
-        with executor_class(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             if reporter.enabled:
                 futures = [
                     executor.submit(
@@ -462,6 +460,44 @@ def _clean_series_chunks(
                 ]
             else:
                 cleaned_chunks = list(executor.map(worker, chunks))
+    else:
+        max_workers = min(n_jobs, len(chunks))
+        if reporter.enabled:
+            results = Parallel(
+                n_jobs=max_workers,
+                backend="loky",
+                return_as="generator_unordered",
+            )(
+                delayed(_clean_chunk_with_elapsed)(
+                    chunk_index,
+                    chunk,
+                    keep_stopwords,
+                    extra_stopwords,
+                    stopword_backend,
+                )
+                for chunk_index, chunk in enumerate(chunks)
+            )
+            cleaned_by_index = {}
+            for chunk_index, cleaned_chunk, elapsed in results:
+                cleaned_by_index[chunk_index] = cleaned_chunk
+                reporter.chunk_done(chunk_index + 1, len(chunks), elapsed)
+
+            cleaned_chunks = [
+                cleaned_by_index[chunk_index] for chunk_index in range(len(chunks))
+            ]
+        else:
+            cleaned_chunks = Parallel(
+                n_jobs=max_workers,
+                backend="loky",
+            )(
+                delayed(_pre_lemmatization_clean_text_batch)(
+                    chunk,
+                    keep_stopwords,
+                    extra_stopwords,
+                    stopword_backend,
+                )
+                for chunk in chunks
+            )
 
     return pd.concat(cleaned_chunks)
 
